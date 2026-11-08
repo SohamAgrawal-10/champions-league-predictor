@@ -749,16 +749,6 @@ This project makes use of:
 
 **Soham Agrawal**
 
-Computer Science student at BITS Pilani.
-
-Interested in:
-
-- Machine Learning
-- AI Engineering
-- Data Science
-- Product Management
-- Sports Analytics
-
 GitHub: **[@SohamAgrawal-10](https://github.com/SohamAgrawal-10)**
 
 ---
