@@ -1,118 +1,95 @@
 import pandas as pd
-import numpy as np
 from sklearn.linear_model import PoissonRegressor
 from sklearn.metrics import mean_poisson_deviance
 
 
 # --------------------------------------------------
-# LOAD DATA
+# LOAD TEAM STRENGTH FEATURES
 # --------------------------------------------------
 
-df = pd.read_csv("data/processed/goal_features.csv")
-league = pd.read_csv("data/processed/league_strength.csv")
+df = pd.read_csv(
+    "data/processed/team_strength_features.csv"
+)
 
 df["MatchDate"] = pd.to_datetime(df["MatchDate"])
 
-# --------------------------------------------------
-# ADD SEASON
-# --------------------------------------------------
-
-df["Season"] = df["MatchDate"].dt.year
-df.loc[df["MatchDate"].dt.month < 8, "Season"] -= 1
 
 # --------------------------------------------------
-# MERGE LEAGUE STRENGTH
+# LOAD DYNAMIC ELO FEATURES
+# --------------------------------------------------
+
+elo = pd.read_csv(
+    "data/processed/elo_features.csv"
+)
+
+elo["MatchDate"] = pd.to_datetime(elo["MatchDate"])
+
+
+# --------------------------------------------------
+# MERGE DYNAMIC ELO
 # --------------------------------------------------
 
 df = df.merge(
-    league,
-    on="Division",
+    elo[
+        [
+            "MatchDate",
+            "HomeTeam",
+            "AwayTeam",
+            "OurHomeElo",
+            "OurAwayElo",
+            "OurEloDiff"
+        ]
+    ],
+    on=[
+        "MatchDate",
+        "HomeTeam",
+        "AwayTeam"
+    ],
     how="left"
 )
 
+
 # --------------------------------------------------
-# REMOVE MATCHES WITHOUT ELO
+# REMOVE MISSING VALUES
 # --------------------------------------------------
 
 df = df.dropna(
     subset=[
         "OurEloDiff",
-        "HomeAttack5",
-        "AwayAttack5",
-        "HomeDefense5",
-        "AwayDefense5"
+        "HomeAttackStrength5",
+        "HomeDefenceStrength5",
+        "AwayAttackStrength5",
+        "AwayDefenceStrength5",
+        "FTHome",
+        "FTAway"
     ]
 ).copy()
 
-# --------------------------------------------------
-# CREATE LEAGUE-ADJUSTED FEATURES
-# --------------------------------------------------
-
-df["LeagueHomeGoals"] = df["AvgHomeGoals"]
-df["LeagueAwayGoals"] = df["AvgAwayGoals"]
-
-df["HomeAttackRatio"] = (
-    df["HomeAttack5"] /
-    df["AvgHomeGoals"]
-)
-
-df["AwayAttackRatio"] = (
-    df["AwayAttack5"] /
-    df["AvgAwayGoals"]
-)
-
-df["HomeDefenseRatio"] = (
-    df["HomeDefense5"] /
-    df["AvgAwayGoals"]
-)
-
-df["AwayDefenseRatio"] = (
-    df["AwayDefense5"] /
-    df["AvgHomeGoals"]
-)
-
-# Replace problematic values
-ratio_columns = [
-    "HomeAttackRatio",
-    "AwayAttackRatio",
-    "HomeDefenseRatio",
-    "AwayDefenseRatio"
-]
-
-df[ratio_columns] = (
-    df[ratio_columns]
-    .replace([np.inf, -np.inf], np.nan)
-    .fillna(1.0)
-)
 
 # --------------------------------------------------
-# CREATE EXPECTED GOAL FEATURES
+# TIME-BASED SPLIT
 # --------------------------------------------------
 
-df["HomeBaseGoals"] = (
-    df["LeagueHomeGoals"] *
-    df["HomeAttackRatio"] *
-    df["AwayDefenseRatio"]
-)
-
-df["AwayBaseGoals"] = (
-    df["LeagueAwayGoals"] *
-    df["AwayAttackRatio"] *
-    df["HomeDefenseRatio"]
-)
-
-# --------------------------------------------------
-# TIME SPLIT
-# --------------------------------------------------
-
-train = df[df["MatchDate"] < "2022-01-01"].copy()
+train = df[
+    df["MatchDate"] < "2022-01-01"
+].copy()
 
 validation = df[
     (df["MatchDate"] >= "2022-01-01") &
     (df["MatchDate"] < "2024-01-01")
 ].copy()
 
-test = df[df["MatchDate"] >= "2024-01-01"].copy()
+test = df[
+    df["MatchDate"] >= "2024-01-01"
+].copy()
+
+
+print("DATASET SPLIT")
+print("-------------")
+print("Train:", len(train))
+print("Validation:", len(validation))
+print("Test:", len(test))
+
 
 # --------------------------------------------------
 # FEATURES
@@ -120,17 +97,26 @@ test = df[df["MatchDate"] >= "2024-01-01"].copy()
 
 features = [
     "OurEloDiff",
-    "HomeBaseGoals",
-    "AwayBaseGoals",
-    "HomeAttack5",
-    "AwayAttack5",
-    "HomeDefense5",
-    "AwayDefense5"
+
+    "HomeAttackStrength5",
+    "HomeDefenceStrength5",
+
+    "AwayAttackStrength5",
+    "AwayDefenceStrength5",
+
+    "AttackStrengthDiff",
+    "DefenceStrengthDiff"
 ]
+
 
 X_train = train[features]
 X_val = validation[features]
 X_test = test[features]
+
+
+# --------------------------------------------------
+# TARGETS
+# --------------------------------------------------
 
 y_home_train = train["FTHome"]
 y_home_val = validation["FTHome"]
@@ -140,8 +126,9 @@ y_away_train = train["FTAway"]
 y_away_val = validation["FTAway"]
 y_away_test = test["FTAway"]
 
+
 # --------------------------------------------------
-# TRAIN MODELS
+# TRAIN HOME GOAL MODEL
 # --------------------------------------------------
 
 home_model = PoissonRegressor(
@@ -149,13 +136,26 @@ home_model = PoissonRegressor(
     max_iter=1000
 )
 
+home_model.fit(
+    X_train,
+    y_home_train
+)
+
+
+# --------------------------------------------------
+# TRAIN AWAY GOAL MODEL
+# --------------------------------------------------
+
 away_model = PoissonRegressor(
     alpha=0.1,
     max_iter=1000
 )
 
-home_model.fit(X_train, y_home_train)
-away_model.fit(X_train, y_away_train)
+away_model.fit(
+    X_train,
+    y_away_train
+)
+
 
 # --------------------------------------------------
 # PREDICT
@@ -167,13 +167,15 @@ away_val_pred = away_model.predict(X_val)
 home_test_pred = home_model.predict(X_test)
 away_test_pred = away_model.predict(X_test)
 
+
 # --------------------------------------------------
 # EVALUATE
 # --------------------------------------------------
 
-print("=== LEAGUE-ADJUSTED POISSON ===")
+print("\n=== TEAM-STRENGTH POISSON V2 ===")
 
 print("\nVALIDATION")
+
 print(
     "Home goal deviance:",
     round(
@@ -196,7 +198,9 @@ print(
     )
 )
 
+
 print("\nTEST")
+
 print(
     "Home goal deviance:",
     round(
@@ -219,6 +223,11 @@ print(
     )
 )
 
+
+# --------------------------------------------------
+# SAMPLE EXPECTED GOALS
+# --------------------------------------------------
+
 print("\n=== SAMPLE EXPECTED GOALS ===")
 
 samples = validation.head(10).copy()
@@ -231,8 +240,12 @@ sample_away = away_model.predict(
     samples[features]
 )
 
+
 for i, (_, row) in enumerate(samples.iterrows()):
+
     print(
         f"{row['HomeTeam']} vs {row['AwayTeam']} "
-        f"-> {sample_home[i]:.2f} - {sample_away[i]:.2f}"
+        f"-> "
+        f"{sample_home[i]:.2f} - "
+        f"{sample_away[i]:.2f}"
     )
