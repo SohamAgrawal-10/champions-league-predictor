@@ -31,6 +31,13 @@ PREDICTIONS_PATH = (
     / "ucl_predictions.csv"
 )
 
+STRENGTH_PATH = (
+    BASE_DIR
+    / "data"
+    / "processed"
+    / "ucl_current_strength.csv"
+)
+
 OUTPUT_PATH = (
     BASE_DIR
     / "data"
@@ -44,7 +51,6 @@ OUTPUT_PATH = (
 # =========================================================
 
 N_SIMULATIONS = 10_000
-
 RANDOM_SEED = 42
 
 rng = np.random.default_rng(RANDOM_SEED)
@@ -55,10 +61,9 @@ rng = np.random.default_rng(RANDOM_SEED)
 # =========================================================
 
 form = pd.read_csv(FORM_PATH)
-
 fixtures = pd.read_csv(FIXTURES_PATH)
-
 predictions = pd.read_csv(PREDICTIONS_PATH)
+strength_df = pd.read_csv(STRENGTH_PATH)
 
 
 # =========================================================
@@ -138,7 +143,19 @@ if missing_predictions:
 
 
 # =========================================================
-# Simulate a match using xG
+# Team strength lookup
+# =========================================================
+
+team_strength = dict(
+    zip(
+        strength_df["Team"],
+        strength_df["CurrentStrength"]
+    )
+)
+
+
+# =========================================================
+# Simulate a league-phase match
 # =========================================================
 
 def simulate_match(home, away):
@@ -150,19 +167,28 @@ def simulate_match(home, away):
     home_xg = prediction["home_xg"]
     away_xg = prediction["away_xg"]
 
-    home_goals = rng.poisson(
-        home_xg
-    )
-
-    away_goals = rng.poisson(
-        away_xg
-    )
+    home_goals = rng.poisson(home_xg)
+    away_goals = rng.poisson(away_xg)
 
     return home_goals, away_goals
 
 
 # =========================================================
 # Rank league table
+# =========================================================
+#
+# Current approximation:
+#
+# 1. Points
+# 2. Goal difference
+# 3. Goals scored
+# 4. Team name
+#
+# The team-name fallback is ONLY there to guarantee
+# deterministic ordering when all modeled criteria are equal.
+#
+# UEFA's complete head-to-head tiebreaker system is not
+# implemented yet.
 # =========================================================
 
 def rank_standings(table):
@@ -190,79 +216,50 @@ def rank_standings(table):
             "Points",
             "GoalDifference",
             "GoalsFor",
+            "Team",
         ],
-        ascending=False
-    ).reset_index(
-        drop=True
-    )
+        ascending=[
+            False,
+            False,
+            False,
+            True,
+        ]
+    ).reset_index(drop=True)
 
     standings["Position"] = (
-        np.arange(
-            len(standings)
-        ) + 1
+        np.arange(len(standings)) + 1
     )
 
     return standings
 
 
 # =========================================================
-# Team strength for knockout matches
-# =========================================================
-#
-# We use the current-strength ratings already produced by
-# the project rather than Points Per Game.
-#
-# This keeps the knockout stage consistent with the model
-# used for the league phase.
-# =========================================================
-
-STRENGTH_PATH = (
-    BASE_DIR
-    / "data"
-    / "processed"
-    / "ucl_current_strength.csv"
-)
-
-strength_df = pd.read_csv(
-    STRENGTH_PATH
-)
-
-team_strength = dict(
-    zip(
-        strength_df["Team"],
-        strength_df["CurrentStrength"]
-    )
-)
-
-
-# =========================================================
 # Simulate knockout match
 # =========================================================
+#
+# Uses the same strength -> goals relationship as the
+# league-phase model.
+#
+# Home xG:
+# exp(0.3910 + 0.1837 * EloDiff)
+#
+# Away xG:
+# exp(0.1013 - 0.1795 * EloDiff)
+#
+# where:
+#
+# EloDiff = (HomeStrength - AwayStrength) / 100
+# =========================================================
 
-def simulate_knockout_match(
-    home,
-    away
-):
-
-    # -----------------------------------------------------
-    # The league-phase prediction file contains only the
-    # remaining league fixtures, so knockout fixtures need
-    # their own xG estimate.
-    #
-    # We use the same strength -> goals relationship that
-    # produced the league-phase predictions.
-    # -----------------------------------------------------
+def simulate_knockout_match(home, away):
 
     home_strength = team_strength[home]
-
     away_strength = team_strength[away]
 
     elo_diff = (
         home_strength
         - away_strength
     ) / 100.0
-
-    # Coefficients learned from the domestic dataset.
 
     home_xg = np.exp(
         0.3910
@@ -274,19 +271,25 @@ def simulate_knockout_match(
         - 0.1795 * elo_diff
     )
 
-    home_goals = rng.poisson(
-        home_xg
-    )
-
-    away_goals = rng.poisson(
-        away_xg
-    )
+    home_goals = rng.poisson(home_xg)
+    away_goals = rng.poisson(away_xg)
 
     return home_goals, away_goals
 
 
 # =========================================================
 # Simulate two-legged playoff
+# =========================================================
+#
+# Seeded team:
+#   - Away in leg 1
+#   - Home in leg 2
+#
+# Unseeded team:
+#   - Home in leg 1
+#   - Away in leg 2
+#
+# No away-goals rule.
 # =========================================================
 
 def simulate_two_legged_playoff(
@@ -296,8 +299,6 @@ def simulate_two_legged_playoff(
 
     # -----------------------------------------------------
     # Leg 1
-    #
-    # Unseeded team hosts first.
     # -----------------------------------------------------
 
     first_home = unseeded
@@ -313,8 +314,6 @@ def simulate_two_legged_playoff(
 
     # -----------------------------------------------------
     # Leg 2
-    #
-    # Seeded team hosts second.
     # -----------------------------------------------------
 
     second_home = seeded
@@ -344,7 +343,7 @@ def simulate_two_legged_playoff(
 
 
     # -----------------------------------------------------
-    # Winner
+    # Determine winner
     # -----------------------------------------------------
 
     if seeded_goals > unseeded_goals:
@@ -358,19 +357,16 @@ def simulate_two_legged_playoff(
 
     # -----------------------------------------------------
     # Aggregate draw
+    # -----------------------------------------------------
     #
-    # No away-goals rule.
+    # UEFA no longer uses the away-goals rule.
     #
-    # Resolve using relative CurrentStrength.
+    # We approximate extra-time / penalties by using the
+    # relative strength of the two teams.
     # -----------------------------------------------------
 
-    seeded_strength = team_strength[
-        seeded
-    ]
-
-    unseeded_strength = team_strength[
-        unseeded
-    ]
+    seeded_strength = team_strength[seeded]
+    unseeded_strength = team_strength[unseeded]
 
     strength_gap = (
         seeded_strength
@@ -392,28 +388,129 @@ def simulate_two_legged_playoff(
 
 
 # =========================================================
-# Create playoff draw
+# Create UEFA-constrained playoff draw
+# =========================================================
+#
+# The 16 playoff teams are divided according to their
+# league-phase positions:
+#
+#   9/10   vs   23/24
+#   11/12  vs   21/22
+#   13/14  vs   19/20
+#   15/16  vs   17/18
+#
+# Within each group, the exact teams are randomized.
+#
+# Example:
+#
+#   9  -> 24
+#   10 -> 23
+#
+# is possible, while:
+#
+#   9 -> 17
+#
+# is NOT possible.
+#
+# The returned tuple is:
+#
+#   (seeded_team, unseeded_team)
+#
 # =========================================================
 
-def create_playoff_draw(
-    seeded,
-    unseeded
-):
+def create_playoff_draw(league_table):
 
-    seeded = list(seeded)
+    # -----------------------------------------------------
+    # Get teams by their actual simulated league position
+    # -----------------------------------------------------
 
-    unseeded = list(unseeded)
+    position_to_team = {
+        int(row["Position"]): row["Team"]
+        for _, row in league_table.iterrows()
+    }
 
-    rng.shuffle(seeded)
 
-    rng.shuffle(unseeded)
+    # -----------------------------------------------------
+    # UEFA position groups
+    # -----------------------------------------------------
+    #
+    # Each tuple contains:
+    #
+    #   (seeded positions, unseeded positions)
+    #
+    # -----------------------------------------------------
 
-    return list(
-        zip(
-            seeded,
-            unseeded
+    position_groups = [
+        (
+            [9, 10],
+            [23, 24]
+        ),
+        (
+            [11, 12],
+            [21, 22]
+        ),
+        (
+            [13, 14],
+            [19, 20]
+        ),
+        (
+            [15, 16],
+            [17, 18]
+        ),
+    ]
+
+
+    playoff_draw = []
+
+
+    # -----------------------------------------------------
+    # Randomize within each UEFA position group
+    # -----------------------------------------------------
+
+    for seeded_positions, unseeded_positions in position_groups:
+
+        seeded_teams = [
+            position_to_team[position]
+            for position in seeded_positions
+        ]
+
+        unseeded_teams = [
+            position_to_team[position]
+            for position in unseeded_positions
+        ]
+
+
+        rng.shuffle(seeded_teams)
+        rng.shuffle(unseeded_teams)
+
+
+        # Pair the two seeded teams with the two permitted
+        # unseeded teams.
+        for seeded_team, unseeded_team in zip(
+            seeded_teams,
+            unseeded_teams
+        ):
+
+            playoff_draw.append(
+                (
+                    seeded_team,
+                    unseeded_team
+                )
+            )
+
+
+    # -----------------------------------------------------
+    # Safety check
+    # -----------------------------------------------------
+
+    if len(playoff_draw) != 8:
+
+        raise ValueError(
+            "Playoff draw did not produce exactly 8 ties."
         )
-    )
+
+
+    return playoff_draw
 
 
 # =========================================================
@@ -449,9 +546,7 @@ print()
 print("Running league + playoff simulations...")
 
 
-for simulation in range(
-    N_SIMULATIONS
-):
+for simulation in range(N_SIMULATIONS):
 
     # -----------------------------------------------------
     # Start from actual current standings
@@ -485,26 +580,20 @@ for simulation in range(
         )
 
 
+        # -------------------------------------------------
         # Goals
+        # -------------------------------------------------
 
-        table[home]["goals_for"] += (
-            home_goals
-        )
+        table[home]["goals_for"] += home_goals
+        table[home]["goals_against"] += away_goals
 
-        table[home]["goals_against"] += (
-            away_goals
-        )
-
-        table[away]["goals_for"] += (
-            away_goals
-        )
-
-        table[away]["goals_against"] += (
-            home_goals
-        )
+        table[away]["goals_for"] += away_goals
+        table[away]["goals_against"] += home_goals
 
 
+        # -------------------------------------------------
         # Points
+        # -------------------------------------------------
 
         if home_goals > away_goals:
 
@@ -517,7 +606,6 @@ for simulation in range(
         else:
 
             table[home]["points"] += 1
-
             table[away]["points"] += 1
 
 
@@ -525,9 +613,7 @@ for simulation in range(
     # Final league table
     # -----------------------------------------------------
 
-    league_table = rank_standings(
-        table
-    )
+    league_table = rank_standings(table)
 
 
     # -----------------------------------------------------
@@ -538,9 +624,8 @@ for simulation in range(
 
         team = row["Team"]
 
-        position = int(
-            row["Position"]
-        )
+        position = int(row["Position"])
+
 
         if position <= 8:
 
@@ -548,37 +633,19 @@ for simulation in range(
 
         elif position <= 24:
 
-            playoff_qualification_counts[
-                team
-            ] += 1
+            playoff_qualification_counts[team] += 1
 
         else:
 
-            elimination_counts[
-                team
-            ] += 1
+            elimination_counts[team] += 1
 
 
     # -----------------------------------------------------
-    # Extract playoff teams
-    # -----------------------------------------------------
-
-    seeded = league_table.iloc[
-        8:16
-    ]["Team"].tolist()
-
-    unseeded = league_table.iloc[
-        16:24
-    ]["Team"].tolist()
-
-
-    # -----------------------------------------------------
-    # Create playoff draw
+    # Create UEFA-constrained playoff draw
     # -----------------------------------------------------
 
     playoff_draw = create_playoff_draw(
-        seeded,
-        unseeded
+        league_table
     )
 
 
@@ -593,9 +660,7 @@ for simulation in range(
             unseeded_team
         )
 
-        playoff_advance_counts[
-            winner
-        ] += 1
+        playoff_advance_counts[winner] += 1
 
 
 # =========================================================
@@ -609,6 +674,7 @@ for team in teams:
     playoff_appearances = (
         playoff_qualification_counts[team]
     )
+
 
     if playoff_appearances > 0:
 
@@ -644,9 +710,7 @@ for team in teams:
     })
 
 
-results = pd.DataFrame(
-    results
-)
+results = pd.DataFrame(results)
 
 
 # =========================================================
@@ -656,20 +720,88 @@ results = pd.DataFrame(
 # A team reaches the Round of 16 if:
 #
 # 1. It finishes top 8
+#
 # OR
+#
 # 2. It finishes 9-24 and wins its playoff
 #
 # =========================================================
 
-results[
-    "RoundOf16Probability"
-] = (
+results["RoundOf16Probability"] = (
     results["Top8Probability"]
     + (
         results["KnockoutPlayoffProbability"]
         * results["PlayoffAdvanceProbability"]
     )
 )
+
+
+# ============================================================
+# VALIDATION
+# ============================================================
+
+league_outcome_per_team = (
+    results["Top8Probability"]
+    + results["KnockoutPlayoffProbability"]
+    + results["EliminationProbability"]
+)
+
+league_outcome_valid = np.allclose(
+    league_outcome_per_team,
+    1.0,
+    atol=1e-9
+)
+
+top8_total_valid = np.isclose(
+    results["Top8Probability"].sum(),
+    8.0,
+    atol=1e-9
+)
+
+playoff_total_valid = np.isclose(
+    results["KnockoutPlayoffProbability"].sum(),
+    16.0,
+    atol=1e-9
+)
+
+elimination_total_valid = np.isclose(
+    results["EliminationProbability"].sum(),
+    12.0,
+    atol=1e-9
+)
+
+print()
+print("VALIDATION")
+print("==========")
+print(
+    "Each team's league outcomes sum to 100%:",
+    league_outcome_valid
+)
+print(
+    "Top 8 probability total = 8:",
+    top8_total_valid
+)
+print(
+    "Playoff probability total = 16:",
+    playoff_total_valid
+)
+print(
+    "Elimination probability total = 12:",
+    elimination_total_valid
+)
+
+if not (
+    league_outcome_valid
+    and top8_total_valid
+    and playoff_total_valid
+    and elimination_total_valid
+):
+    raise ValueError(
+        "League outcome probabilities failed validation."
+    )
+
+print()
+print("VALIDATION PASSED")
 
 
 # =========================================================
@@ -679,9 +811,7 @@ results[
 results = results.sort_values(
     by="RoundOf16Probability",
     ascending=False
-).reset_index(
-    drop=True
-)
+).reset_index(drop=True)
 
 
 # =========================================================

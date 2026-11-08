@@ -167,10 +167,13 @@ def simulate_league_phase(rng):
 
     # Simplified ranking:
     # Points → Goal Difference → Goals Scored
+    #
+    # Team name is used as a deterministic fallback
+    # so tied simulations do not depend on pandas ordering.
 
     league_table = league_table.sort_values(
-        ["Points", "GD", "GF"],
-        ascending=False
+        ["Points", "GD", "GF", "Team"],
+        ascending=[False, False, False, True]
     ).reset_index(drop=True)
 
     league_table["Position"] = (
@@ -186,19 +189,80 @@ def simulate_league_phase(rng):
 
 def create_playoff_draw(league_table, rng):
     """
-    Positions 9–16 are seeded.
-    Positions 17–24 are unseeded.
+    Create the Champions League playoff draw using
+    position-based seeded/unseeded constraints.
 
-    V1 uses random seeded-vs-unseeded pairing.
+    Seeded positions:
+        9–16
+
+    Unseeded positions:
+        17–24
+
+    Allowed pairings:
+
+        9/10   vs 23/24
+        11/12  vs 21/22
+        13/14  vs 19/20
+        15/16  vs 17/18
+
+    Within each position group, the exact opponent
+    is randomized.
     """
 
-    seeded = league_table.iloc[8:16]["Team"].tolist()
-    unseeded = league_table.iloc[16:24]["Team"].tolist()
+    # --------------------------------------------------------
+    # Position groups
+    # --------------------------------------------------------
 
-    rng.shuffle(seeded)
-    rng.shuffle(unseeded)
+    seeded_groups = [
+        # 9–10
+        league_table.iloc[8:10]["Team"].tolist(),
 
-    return list(zip(seeded, unseeded))
+        # 11–12
+        league_table.iloc[10:12]["Team"].tolist(),
+
+        # 13–14
+        league_table.iloc[12:14]["Team"].tolist(),
+
+        # 15–16
+        league_table.iloc[14:16]["Team"].tolist(),
+    ]
+
+    unseeded_groups = [
+        # 23–24
+        league_table.iloc[22:24]["Team"].tolist(),
+
+        # 21–22
+        league_table.iloc[20:22]["Team"].tolist(),
+
+        # 19–20
+        league_table.iloc[18:20]["Team"].tolist(),
+
+        # 17–18
+        league_table.iloc[16:18]["Team"].tolist(),
+    ]
+
+    draw = []
+
+    for seeded_group, unseeded_group in zip(
+        seeded_groups,
+        unseeded_groups
+    ):
+
+        seeded = seeded_group.copy()
+        unseeded = unseeded_group.copy()
+
+        rng.shuffle(seeded)
+        rng.shuffle(unseeded)
+
+        for team1, team2 in zip(
+            seeded,
+            unseeded
+        ):
+            draw.append(
+                (team1, team2)
+            )
+
+    return draw
 
 
 # ============================================================
@@ -267,6 +331,10 @@ def simulate_two_legged_tie(
         rng,
     )
 
+    # --------------------------------------------------------
+    # AGGREGATE SCORE
+    # --------------------------------------------------------
+
     team1_total = (
         leg1_away_goals +
         leg2_home_goals
@@ -314,8 +382,13 @@ def simulate_two_legged_tie(
         team2_xg_leg2
     ) / 3
 
-    team1_et_goals = rng.poisson(team1_et_xg)
-    team2_et_goals = rng.poisson(team2_et_xg)
+    team1_et_goals = rng.poisson(
+        team1_et_xg
+    )
+
+    team2_et_goals = rng.poisson(
+        team2_et_xg
+    )
 
     if team1_et_goals > team2_et_goals:
         return team1
@@ -338,7 +411,10 @@ def simulate_two_legged_tie(
 # PLAYOFFS
 # ============================================================
 
-def simulate_playoffs(league_table, rng):
+def simulate_playoffs(
+    league_table,
+    rng,
+):
 
     draw = create_playoff_draw(
         league_table,
@@ -384,7 +460,12 @@ def create_round_of_16_draw(
     rng.shuffle(seeded)
     rng.shuffle(unseeded)
 
-    return list(zip(seeded, unseeded))
+    return list(
+        zip(
+            seeded,
+            unseeded
+        )
+    )
 
 
 # ============================================================
@@ -435,7 +516,10 @@ def create_quarter_final_draw(
     rng.shuffle(teams)
 
     return [
-        (teams[i], teams[i + 1])
+        (
+            teams[i],
+            teams[i + 1]
+        )
         for i in range(0, 8, 2)
     ]
 
@@ -486,7 +570,10 @@ def create_semi_final_draw(
     rng.shuffle(teams)
 
     return [
-        (teams[i], teams[i + 1])
+        (
+            teams[i],
+            teams[i + 1]
+        )
         for i in range(0, 4, 2)
     ]
 
@@ -549,8 +636,9 @@ def simulate_final(
     if team2_goals > team1_goals:
         return team2
 
-    # Draw after 90 minutes:
-    # approximate extra time.
+    # --------------------------------------------------------
+    # EXTRA TIME
+    # --------------------------------------------------------
 
     team1_xg, team2_xg = calculate_xg(
         team1,
@@ -571,7 +659,9 @@ def simulate_final(
     if team2_et_goals > team1_et_goals:
         return team2
 
-    # Still tied → penalties
+    # --------------------------------------------------------
+    # PENALTIES
+    # --------------------------------------------------------
 
     return simulate_penalty_shootout(
         team1,
@@ -590,6 +680,18 @@ def run_simulation():
         RANDOM_SEED
     )
 
+    print(f"Teams: {len(teams)}")
+    print(f"Simulations: {N_SIMULATIONS}")
+    print(
+        f"Remaining fixtures: "
+        f"{len(remaining_fixtures)}"
+    )
+
+    print()
+    print(
+        "Running full tournament simulations..."
+    )
+
     # --------------------------------------------------------
     # Counters
     # --------------------------------------------------------
@@ -604,13 +706,17 @@ def run_simulation():
     # SIMULATIONS
     # --------------------------------------------------------
 
-    for simulation in range(N_SIMULATIONS):
+    for simulation in range(
+        N_SIMULATIONS
+    ):
 
         # ====================================================
         # 1. LEAGUE PHASE
         # ====================================================
 
-        league_table = simulate_league_phase(rng)
+        league_table = simulate_league_phase(
+            rng
+        )
 
         top8 = (
             league_table
@@ -638,7 +744,8 @@ def run_simulation():
 
         if len(r16_teams) != 16:
             raise RuntimeError(
-                "Round of 16 does not contain exactly 16 teams."
+                "Round of 16 does not contain "
+                "exactly 16 teams."
             )
 
         for team in r16_teams:
@@ -648,15 +755,18 @@ def run_simulation():
         # 4. ROUND OF 16
         # ====================================================
 
-        quarter_finalists = simulate_round_of_16(
-            league_table,
-            playoff_winners,
-            rng,
+        quarter_finalists = (
+            simulate_round_of_16(
+                league_table,
+                playoff_winners,
+                rng,
+            )
         )
 
         if len(quarter_finalists) != 8:
             raise RuntimeError(
-                "Quarter-finals do not contain exactly 8 teams."
+                "Quarter-finals do not contain "
+                "exactly 8 teams."
             )
 
         for team in quarter_finalists:
@@ -666,14 +776,17 @@ def run_simulation():
         # 5. QUARTER-FINALS
         # ====================================================
 
-        semi_finalists = simulate_quarter_finals(
-            quarter_finalists,
-            rng,
+        semi_finalists = (
+            simulate_quarter_finals(
+                quarter_finalists,
+                rng,
+            )
         )
 
         if len(semi_finalists) != 4:
             raise RuntimeError(
-                "Semi-finals do not contain exactly 4 teams."
+                "Semi-finals do not contain "
+                "exactly 4 teams."
             )
 
         for team in semi_finalists:
@@ -683,14 +796,17 @@ def run_simulation():
         # 6. SEMI-FINALS
         # ====================================================
 
-        finalists = simulate_semi_finals(
-            semi_finalists,
-            rng,
+        finalists = (
+            simulate_semi_finals(
+                semi_finalists,
+                rng,
+            )
         )
 
         if len(finalists) != 2:
             raise RuntimeError(
-                "Final does not contain exactly 2 teams."
+                "Final does not contain "
+                "exactly 2 teams."
             )
 
         for team in finalists:
@@ -711,7 +827,9 @@ def run_simulation():
         # Progress
         # ----------------------------------------------------
 
-        if (simulation + 1) % 1000 == 0:
+        if (
+            simulation + 1
+        ) % 1000 == 0:
 
             print(
                 f"Completed "
@@ -753,16 +871,23 @@ def run_simulation():
             }
         )
 
-    results = pd.DataFrame(results)
+    results = pd.DataFrame(
+        results
+    )
 
     # Sort by winner probability
+
     results = results.sort_values(
         "WinnerProbability",
         ascending=False,
-    ).reset_index(drop=True)
+    ).reset_index(
+        drop=True
+    )
 
     results["Rank"] = (
-        np.arange(len(results)) + 1
+        np.arange(
+            len(results)
+        ) + 1
     )
 
     results = results[
@@ -787,48 +912,58 @@ def run_simulation():
     print("=" * 80)
 
     r16_total = (
-        results["RoundOf16Probability"]
-        .sum()
+        results[
+            "RoundOf16Probability"
+        ].sum()
     )
 
     qf_total = (
-        results["QuarterFinalProbability"]
-        .sum()
+        results[
+            "QuarterFinalProbability"
+        ].sum()
     )
 
     sf_total = (
-        results["SemiFinalProbability"]
-        .sum()
+        results[
+            "SemiFinalProbability"
+        ].sum()
     )
 
     final_total = (
-        results["FinalProbability"]
-        .sum()
+        results[
+            "FinalProbability"
+        ].sum()
     )
 
     winner_total = (
-        results["WinnerProbability"]
-        .sum()
+        results[
+            "WinnerProbability"
+        ].sum()
     )
 
     print(
-        f"R16 probability total:     {r16_total:.4f}"
+        f"R16 probability total:     "
+        f"{r16_total:.4f}"
     )
 
     print(
-        f"QF probability total:      {qf_total:.4f}"
+        f"QF probability total:      "
+        f"{qf_total:.4f}"
     )
 
     print(
-        f"SF probability total:      {sf_total:.4f}"
+        f"SF probability total:      "
+        f"{sf_total:.4f}"
     )
 
     print(
-        f"Final probability total:   {final_total:.4f}"
+        f"Final probability total:   "
+        f"{final_total:.4f}"
     )
 
     print(
-        f"Winner probability total:  {winner_total:.4f}"
+        f"Winner probability total:  "
+        f"{winner_total:.4f}"
     )
 
     print()
@@ -839,7 +974,8 @@ def run_simulation():
         atol=0.001,
     ):
         raise RuntimeError(
-            "R16 probability total should equal 16."
+            "R16 probability total "
+            "should equal 16."
         )
 
     if not np.isclose(
@@ -848,7 +984,8 @@ def run_simulation():
         atol=0.001,
     ):
         raise RuntimeError(
-            "QF probability total should equal 8."
+            "QF probability total "
+            "should equal 8."
         )
 
     if not np.isclose(
@@ -857,7 +994,8 @@ def run_simulation():
         atol=0.001,
     ):
         raise RuntimeError(
-            "SF probability total should equal 4."
+            "SF probability total "
+            "should equal 4."
         )
 
     if not np.isclose(
@@ -866,7 +1004,8 @@ def run_simulation():
         atol=0.001,
     ):
         raise RuntimeError(
-            "Final probability total should equal 2."
+            "Final probability total "
+            "should equal 2."
         )
 
     if not np.isclose(
@@ -875,10 +1014,13 @@ def run_simulation():
         atol=0.001,
     ):
         raise RuntimeError(
-            "Winner probability total should equal 1."
+            "Winner probability total "
+            "should equal 1."
         )
 
-    print("VALIDATION PASSED")
+    print(
+        "VALIDATION PASSED"
+    )
 
     # ========================================================
     # SAVE
@@ -896,7 +1038,8 @@ def run_simulation():
     print()
     print("=" * 80)
     print(
-        "FULL CHAMPIONS LEAGUE TOURNAMENT SIMULATION"
+        "FULL CHAMPIONS LEAGUE "
+        "TOURNAMENT SIMULATION"
     )
     print("=" * 80)
 
@@ -914,11 +1057,16 @@ def run_simulation():
 
         display[column] = (
             display[column]
-            .map(lambda x: f"{x:.1%}")
+            .map(
+                lambda x:
+                f"{x:.1%}"
+            )
         )
 
     print(
-        display.to_string(index=False)
+        display.to_string(
+            index=False
+        )
     )
 
     print()
